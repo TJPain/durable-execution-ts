@@ -4,7 +4,11 @@
   "description": "Building a durable execution engine from scratch using TypeScript, Node.js and Postgres.",
   "type": "module",
   "scripts": {
-    "lesson": "tsx"
+    "start": "tsx src/main.ts",
+    "test": "vitest run",
+    "db:up": "docker compose up -d",
+    "db:migrate": "psql $DATABASE_URL -f sql/schema.sql",
+    "db:reset": "psql $DATABASE_URL -c 'DROP TABLE IF EXISTS tasks' && npm run db:migrate"
   },
   "keywords": [],
   "author": "",
@@ -15,6 +19,7 @@
   "devDependencies": {
     "@types/node": "^25.9.3",
     "tsx": "^4.22.4",
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.8"
   }
 }
