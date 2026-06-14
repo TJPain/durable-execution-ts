@@ -4,6 +4,7 @@ interface Task {
   id: string;
   name: string;
   payload: object;
+  timeout_seconds: number;
 }
 
 interface WorkerOptions {
@@ -12,7 +13,8 @@ interface WorkerOptions {
   signal?: AbortSignal;
 }
 
-type TaskHandler = (payload: object) => Promise<void>;
+/** Handlers receive an AbortSignal that fires when the task's timeout expires. */
+type TaskHandler = (payload: object, signal: AbortSignal) => Promise<void>;
 
 const handlers = new Map<string, TaskHandler>();
 
@@ -53,17 +55,20 @@ export async function processTask(task: Task): Promise<void> {
 
   if (!handler) {
     console.error(`No handler registered for "${task.name}"`);
-    await nack(task.id);
+    await nack(task.id, new Error(`no handler registered for "${task.name}"`));
     return;
   }
 
+  const timeoutSignal = AbortSignal.timeout(task.timeout_seconds * 1000);
+
   try {
-    await handler(task.payload);
+    await handler(task.payload, timeoutSignal);
     await ack(task.id);
     console.log(`Completed task ${task.id}`);
   } catch (err) {
-    console.error(`Failed task ${task.id}:`, err);
-    await nack(task.id);
+    const error = err instanceof Error ? err : new Error(String(err));
+    console.error(`Failed task ${task.id}:`, error.message);
+    await nack(task.id, error);
   }
 }
 
