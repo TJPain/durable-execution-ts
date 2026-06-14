@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterAll } from "vitest";
 import sql from "../src/db";
-import { enqueue } from "../src/queue";
+import { enqueue, type Task } from "../src/queue";
 import { register, start, processTask } from "../src/worker";
 
 beforeEach(async () => {
@@ -11,6 +11,15 @@ afterAll(async () => {
   await sql.end();
 });
 
+async function dequeueRaw(id: string): Promise<Task> {
+  const [task] = await sql<Task[]>`
+    UPDATE tasks SET status = 'running', attempts = attempts + 1
+    WHERE id = ${id}
+    RETURNING id, name, payload, attempts, max_attempts, timeout_seconds
+  `;
+  return task;
+}
+
 describe("processTask", () => {
   it("calls the handler with the task payload and acks", async () => {
     let received: object | null = null;
@@ -19,13 +28,9 @@ describe("processTask", () => {
     });
 
     const id = await enqueue("test-task", { key: "value" });
-    const [task] = await sql`
-      UPDATE tasks SET status = 'running', attempts = 1
-      WHERE id = ${id}
-      RETURNING id, name, payload, timeout_seconds
-    `;
+    const task = await dequeueRaw(id);
 
-    await processTask(task as { id: string; name: string; payload: object; timeout_seconds: number });
+    await processTask(task);
 
     expect(received).toEqual({ key: "value" });
     const [row] = await sql`SELECT status FROM tasks WHERE id = ${id}`;
@@ -38,13 +43,9 @@ describe("processTask", () => {
     });
 
     const id = await enqueue("failing-task", {}, { maxAttempts: 1 });
-    const [task] = await sql`
-      UPDATE tasks SET status = 'running', attempts = 1
-      WHERE id = ${id}
-      RETURNING id, name, payload, timeout_seconds
-    `;
+    const task = await dequeueRaw(id);
 
-    await processTask(task as { id: string; name: string; payload: object; timeout_seconds: number });
+    await processTask(task);
 
     const [row] = await sql`SELECT status, error FROM tasks WHERE id = ${id}`;
     expect(row.status).toBe("failed");
@@ -57,13 +58,9 @@ describe("processTask", () => {
     });
 
     const id = await enqueue("retryable-task", {}, { maxAttempts: 3 });
-    const [task] = await sql`
-      UPDATE tasks SET status = 'running', attempts = 1
-      WHERE id = ${id}
-      RETURNING id, name, payload, timeout_seconds
-    `;
+    const task = await dequeueRaw(id);
 
-    await processTask(task as { id: string; name: string; payload: object; timeout_seconds: number });
+    await processTask(task);
 
     const [row] = await sql`SELECT status, error FROM tasks WHERE id = ${id}`;
     expect(row.status).toBe("pending");
@@ -72,13 +69,9 @@ describe("processTask", () => {
 
   it("nacks when no handler is registered", async () => {
     const id = await enqueue("unknown-task", {}, { maxAttempts: 1 });
-    const [task] = await sql`
-      UPDATE tasks SET status = 'running', attempts = 1
-      WHERE id = ${id}
-      RETURNING id, name, payload, timeout_seconds
-    `;
+    const task = await dequeueRaw(id);
 
-    await processTask(task as { id: string; name: string; payload: object; timeout_seconds: number });
+    await processTask(task);
 
     const [row] = await sql`SELECT status FROM tasks WHERE id = ${id}`;
     expect(row.status).toBe("failed");
@@ -96,13 +89,23 @@ describe("processTask", () => {
     });
 
     const id = await enqueue("slow-task", {}, { maxAttempts: 1, timeoutSeconds: 1 });
-    const [task] = await sql`
-      UPDATE tasks SET status = 'running', attempts = 1
-      WHERE id = ${id}
-      RETURNING id, name, payload, timeout_seconds
-    `;
+    const task = await dequeueRaw(id);
 
-    await processTask(task as { id: string; name: string; payload: object; timeout_seconds: number });
+    await processTask(task);
+
+    const [row] = await sql`SELECT status FROM tasks WHERE id = ${id}`;
+    expect(row.status).toBe("failed");
+  }, 3000);
+
+  it("times out even if handler ignores the signal", async () => {
+    register("ignores-signal", async () => {
+      await new Promise((resolve) => setTimeout(resolve, 5000));
+    });
+
+    const id = await enqueue("ignores-signal", {}, { maxAttempts: 1, timeoutSeconds: 1 });
+    const task = await dequeueRaw(id);
+
+    await processTask(task);
 
     const [row] = await sql`SELECT status FROM tasks WHERE id = ${id}`;
     expect(row.status).toBe("failed");
@@ -158,7 +161,6 @@ describe("start", () => {
 
     await enqueue("eventually-succeeds", {}, { maxAttempts: 3 });
 
-    // Continuously reset run_after so backoff doesn't block the test
     const resetInterval = setInterval(async () => {
       await sql`UPDATE tasks SET run_after = now() WHERE status = 'pending'`;
     }, 50);

@@ -1,11 +1,4 @@
-import { dequeue, ack, nack } from "./queue";
-
-interface Task {
-  id: string;
-  name: string;
-  payload: object;
-  timeout_seconds: number;
-}
+import { dequeue, ack, nack, type Task } from "./queue";
 
 interface WorkerOptions {
   concurrency?: number;
@@ -55,20 +48,38 @@ export async function processTask(task: Task): Promise<void> {
 
   if (!handler) {
     console.error(`No handler registered for "${task.name}"`);
-    await nack(task.id, new Error(`no handler registered for "${task.name}"`));
+    await nack(task.id, task, new Error(`no handler registered for "${task.name}"`));
     return;
   }
 
-  const timeoutSignal = AbortSignal.timeout(task.timeout_seconds * 1000);
+  const timeoutController = new AbortController();
+  const timer = setTimeout(() => timeoutController.abort(), task.timeout_seconds * 1000);
 
   try {
-    await handler(task.payload, timeoutSignal);
+    // Promise.race enforces the timeout even if the handler ignores the signal
+    await Promise.race([
+      handler(task.payload, timeoutController.signal),
+      new Promise<never>((_, reject) => {
+        timeoutController.signal.addEventListener("abort", () =>
+          reject(new Error(`task timed out after ${task.timeout_seconds}s`))
+        );
+      }),
+    ]);
+    clearTimeout(timer);
+  } catch (err) {
+    clearTimeout(timer);
+    const error = err instanceof Error ? err : new Error(String(err));
+    console.error(`Failed task ${task.id}:`, error.message);
+    await nack(task.id, task, error);
+    return;
+  }
+
+  // ack separately — if this fails, we don't nack (which would cause duplicate execution)
+  try {
     await ack(task.id);
     console.log(`Completed task ${task.id}`);
   } catch (err) {
-    const error = err instanceof Error ? err : new Error(String(err));
-    console.error(`Failed task ${task.id}:`, error.message);
-    await nack(task.id, error);
+    console.error(`Failed to ack task ${task.id} (task completed but ack failed):`, err);
   }
 }
 

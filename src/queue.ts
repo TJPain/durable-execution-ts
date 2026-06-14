@@ -1,7 +1,7 @@
 import sql from "./db";
 import type { JSONValue } from "postgres";
 
-interface Task {
+export interface Task {
   id: string;
   name: string;
   payload: Record<string, unknown>;
@@ -64,18 +64,17 @@ export async function ack(id: string): Promise<void> {
   await sql`
     UPDATE tasks
     SET status = 'completed', completed_at = now()
-    WHERE id = ${id}
+    WHERE id = ${id} AND status = 'running'
   `;
 }
 
 /**
  * Marks a task as failed. If retryable and under max_attempts, requeues with
  * exponential backoff (2^n seconds). Otherwise fails permanently.
+ * Only updates tasks still in 'running' state to prevent race conditions.
  */
-export async function nack(id: string, error: Error): Promise<void> {
+export async function nack(id: string, task: Pick<Task, "attempts" | "max_attempts">, error: Error): Promise<void> {
   const isRetryable = !(error instanceof NonRetryableError);
-
-  const [task] = await sql`SELECT attempts, max_attempts FROM tasks WHERE id = ${id}`;
 
   if (isRetryable && task.attempts < task.max_attempts) {
     const backoffSeconds = Math.pow(2, task.attempts - 1);
@@ -85,13 +84,13 @@ export async function nack(id: string, error: Error): Promise<void> {
       SET status = 'pending',
           error = ${error.message},
           run_after = now() + ${backoffSeconds + " seconds"}::interval
-      WHERE id = ${id}
+      WHERE id = ${id} AND status = 'running'
     `;
   } else {
     await sql`
       UPDATE tasks
       SET status = 'failed', completed_at = now(), error = ${error.message}
-      WHERE id = ${id}
+      WHERE id = ${id} AND status = 'running'
     `;
   }
 }
