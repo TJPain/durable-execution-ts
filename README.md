@@ -6,6 +6,12 @@ Durable execution is a mechanism to incrementally checkpoint the state of a func
 
 Inspired by the Go project [Durable Execution, the Hard Way](https://github.com/hatchet-dev/durable-execution-the-hard-way) but extended with LISTEN/NOTIFY.
 
+## Architecture
+
+- **Queue** (`src/queue.ts`) — Enqueue/dequeue tasks backed by Postgres `FOR UPDATE SKIP LOCKED` for safe concurrent access
+- **Worker** (`src/worker.ts`) — Polls the queue, dispatches tasks to registered handlers with configurable concurrency
+- **DB** (`src/db.ts`) — Postgres connection pool via [Postgres.js](https://github.com/porsager/postgres)
+
 ## Prerequisites
 
 - Node.js 22+

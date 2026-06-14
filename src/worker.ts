@@ -1,23 +1,36 @@
 import { dequeue, ack, nack } from "./queue";
 
+interface Task {
+  id: string;
+  name: string;
+  payload: object;
+}
+
+interface WorkerOptions {
+  concurrency?: number;
+  pollIntervalMs?: number;
+  signal?: AbortSignal;
+}
+
 type TaskHandler = (payload: object) => Promise<void>;
 
 const handlers = new Map<string, TaskHandler>();
-
-let running = false;
 
 export function register(name: string, handler: TaskHandler): void {
   handlers.set(name, handler);
 }
 
-export async function start(pollIntervalMs = 1000): Promise<void> {
-  running = true;
-  console.log("Worker started, polling for tasks...");
+export async function start({ concurrency = 5, pollIntervalMs = 1000, signal }: WorkerOptions = {}): Promise<void> {
+  const active = new Set<Promise<void>>();
 
-  process.on("SIGINT", () => shutdown());
-  process.on("SIGTERM", () => shutdown());
+  console.log(`Worker started (concurrency=${concurrency}), polling for tasks...`);
 
-  while (running) {
+  while (!signal?.aborted) {
+    if (active.size >= concurrency) {
+      await Promise.race(active);
+      continue;
+    }
+
     const task = await dequeue();
 
     if (!task) {
@@ -25,32 +38,33 @@ export async function start(pollIntervalMs = 1000): Promise<void> {
       continue;
     }
 
-    console.log(`Processing task ${task.id} [${task.name}]`);
-
-    const handler = handlers.get(task.name);
-
-    if (!handler) {
-      console.error(`No handler registered for "${task.name}"`);
-      await nack(task.id);
-      continue;
-    }
-
-    try {
-      await handler(task.payload);
-      await ack(task.id);
-      console.log(`Completed task ${task.id}`);
-    } catch (err) {
-      console.error(`Failed task ${task.id}:`, err);
-      await nack(task.id);
-    }
+    const job = processTask(task).finally(() => active.delete(job));
+    active.add(job);
   }
 
+  await Promise.all(active);
   console.log("Worker shut down");
 }
 
-function shutdown(): void {
-  console.log("\nShutting down");
-  running = false;
+export async function processTask(task: Task): Promise<void> {
+  console.log(`Processing task ${task.id} [${task.name}]`);
+
+  const handler = handlers.get(task.name);
+
+  if (!handler) {
+    console.error(`No handler registered for "${task.name}"`);
+    await nack(task.id);
+    return;
+  }
+
+  try {
+    await handler(task.payload);
+    await ack(task.id);
+    console.log(`Completed task ${task.id}`);
+  } catch (err) {
+    console.error(`Failed task ${task.id}:`, err);
+    await nack(task.id);
+  }
 }
 
 function sleep(ms: number): Promise<void> {
