@@ -8,8 +8,8 @@ Inspired by the Go project [Durable Execution, the Hard Way](https://github.com/
 
 ## Architecture
 
-- **Queue** (`src/queue.ts`) — Enqueue/dequeue tasks backed by Postgres `FOR UPDATE SKIP LOCKED` for safe concurrent access
-- **Worker** (`src/worker.ts`) — Polls the queue, dispatches tasks to registered handlers with configurable concurrency
+- **Queue** (`src/queue.ts`) — Enqueue/dequeue tasks backed by Postgres `FOR UPDATE SKIP LOCKED` for safe concurrent access. Retries with exponential backoff, `NonRetryableError` for permanent failures.
+- **Worker** (`src/worker.ts`) — Polls the queue, dispatches tasks to registered handlers with configurable concurrency. Per-task execution timeouts via `AbortSignal`.
 - **DB** (`src/db.ts`) — Postgres connection pool via [Postgres.js](https://github.com/porsager/postgres)
 
 ## Prerequisites
