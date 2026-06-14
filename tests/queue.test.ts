@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterAll } from "vitest";
 import sql from "../src/db";
-import { enqueue, dequeue, ack, nack } from "../src/queue";
+import { enqueue, dequeue, ack, nack, NonRetryableError } from "../src/queue";
 
 beforeEach(async () => {
   await sql`TRUNCATE tasks`;
@@ -19,6 +19,14 @@ describe("enqueue", () => {
     expect(task.payload).toEqual({ to: "user@example.com" });
     expect(task.status).toBe("pending");
   });
+
+  it("accepts custom max_attempts and timeout", async () => {
+    const id = await enqueue("task", {}, { maxAttempts: 5, timeoutSeconds: 120 });
+
+    const [task] = await sql`SELECT max_attempts, timeout_seconds FROM tasks WHERE id = ${id}`;
+    expect(task.max_attempts).toBe(5);
+    expect(task.timeout_seconds).toBe(120);
+  });
 });
 
 describe("dequeue", () => {
@@ -29,8 +37,9 @@ describe("dequeue", () => {
     const task = await dequeue();
     expect(task?.name).toBe("first");
 
-    const [row] = await sql`SELECT status FROM tasks WHERE id = ${task!.id}`;
+    const [row] = await sql`SELECT status, attempts FROM tasks WHERE id = ${task!.id}`;
     expect(row.status).toBe("running");
+    expect(row.attempts).toBe(1);
   });
 
   it("returns null when queue is empty", async () => {
@@ -39,11 +48,21 @@ describe("dequeue", () => {
   });
 
   it("does not return tasks that are already running", async () => {
-    const id = await enqueue("task", {});
+    await enqueue("task", {});
     await dequeue();
 
     const second = await dequeue();
     expect(second).toBeNull();
+  });
+
+  it("does not return tasks whose run_after is in the future", async () => {
+    await sql`
+      INSERT INTO tasks (name, payload, run_after)
+      VALUES ('future-task', '{}', now() + interval '1 hour')
+    `;
+
+    const task = await dequeue();
+    expect(task).toBeNull();
   });
 });
 
@@ -60,14 +79,64 @@ describe("ack", () => {
 });
 
 describe("nack", () => {
-  it("marks a task as failed", async () => {
-    await enqueue("task", {});
+  it("retries if under max attempts", async () => {
+    await enqueue("task", {}, { maxAttempts: 3 });
     const task = await dequeue();
-    await nack(task!.id);
+    await nack(task!.id, task!, new Error("transient failure"));
 
-    const [row] = await sql`SELECT status, completed_at FROM tasks WHERE id = ${task!.id}`;
+    const [row] = await sql`SELECT status, error, run_after FROM tasks WHERE id = ${task!.id}`;
+    expect(row.status).toBe("pending");
+    expect(row.error).toBe("transient failure");
+    expect(new Date(row.run_after).getTime()).toBeGreaterThan(Date.now());
+  });
+
+  it("fails permanently at max attempts", async () => {
+    await enqueue("task", {}, { maxAttempts: 1 });
+    const task = await dequeue();
+    await nack(task!.id, task!, new Error("fatal"));
+
+    const [row] = await sql`SELECT status, error FROM tasks WHERE id = ${task!.id}`;
     expect(row.status).toBe("failed");
-    expect(row.completed_at).not.toBeNull();
+    expect(row.error).toBe("fatal");
+  });
+
+  it("fails permanently for NonRetryableError regardless of attempts", async () => {
+    await enqueue("task", {}, { maxAttempts: 5 });
+    const task = await dequeue();
+    await nack(task!.id, task!, new NonRetryableError("bad input"));
+
+    const [row] = await sql`SELECT status, error FROM tasks WHERE id = ${task!.id}`;
+    expect(row.status).toBe("failed");
+    expect(row.error).toBe("bad input");
+  });
+
+  it("applies exponential backoff on successive retries", async () => {
+    await enqueue("task", {}, { maxAttempts: 4 });
+
+    const first = await dequeue();
+    await nack(first!.id, first!, new Error("fail"));
+    const [after1] = await sql`SELECT run_after FROM tasks WHERE id = ${first!.id}`;
+
+    await sql`UPDATE tasks SET run_after = now() WHERE id = ${first!.id}`;
+    const second = await dequeue();
+    await nack(second!.id, second!, new Error("fail"));
+    const [after2] = await sql`SELECT run_after FROM tasks WHERE id = ${second!.id}`;
+
+    const backoff1 = new Date(after1.run_after).getTime() - Date.now();
+    const backoff2 = new Date(after2.run_after).getTime() - Date.now();
+    expect(backoff2).toBeGreaterThan(backoff1);
+  });
+
+  it("does not update a task that is no longer running", async () => {
+    await enqueue("task", {}, { maxAttempts: 3 });
+    const task = await dequeue();
+    await ack(task!.id);
+
+    // nack after ack should be a no-op due to WHERE status = 'running' guard
+    await nack(task!.id, task!, new Error("too late"));
+
+    const [row] = await sql`SELECT status FROM tasks WHERE id = ${task!.id}`;
+    expect(row.status).toBe("completed");
   });
 });
 
