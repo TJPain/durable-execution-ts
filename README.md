@@ -18,16 +18,28 @@ Inspired by the Go project [Durable Execution, the Hard Way](https://github.com/
 npm install
 
 # Start Postgres
-docker compose up -d
+npm run db:up
 
 # Set the connection string
 export DATABASE_URL="postgresql://durable:durable@localhost:5432/durable"
 
 # Apply the schema
-psql $DATABASE_URL -f sql/schema.sql
+npm run db:migrate
 
 # Run the demo
-npx tsx src/main.ts
+npm start
 ```
 
 Press Ctrl+C to shut down the worker gracefully.
+
+## Tests
+
+```bash
+npm test
+```
+
+## Other commands
+
+```bash
+npm run db:reset   # Drop and recreate the tasks table
+```
