@@ -15,6 +15,10 @@ export function register(name: string, handler: TaskHandler): void {
   handlers.set(name, handler);
 }
 
+export function clearHandlers(): void {
+  handlers.clear();
+}
+
 export async function start({ concurrency = 5, pollIntervalMs = 1000, signal }: WorkerOptions = {}): Promise<void> {
   const active = new Set<Promise<void>>();
 
@@ -26,7 +30,17 @@ export async function start({ concurrency = 5, pollIntervalMs = 1000, signal }: 
       continue;
     }
 
-    const task = await dequeue();
+    let task: Task | null;
+
+    try {
+      task = await dequeue();
+    } catch (err) {
+      console.error("Failed to dequeue:", err);
+      await sleep(pollIntervalMs);
+      continue;
+    }
+
+    if (signal?.aborted) break;
 
     if (!task) {
       await sleep(pollIntervalMs);

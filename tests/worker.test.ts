@@ -1,10 +1,11 @@
 import { describe, it, expect, beforeEach, afterAll } from "vitest";
 import sql from "../src/db";
 import { enqueue, type Task } from "../src/queue";
-import { register, start, processTask } from "../src/worker";
+import { register, clearHandlers, start, processTask } from "../src/worker";
 
 beforeEach(async () => {
   await sql`TRUNCATE tasks`;
+  clearHandlers();
 });
 
 afterAll(async () => {
