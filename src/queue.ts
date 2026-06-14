@@ -1,12 +1,13 @@
 import sql from "./db";
+import type { JSONValue } from "postgres";
 
 interface Task {
   id: string;
   name: string;
-  payload: object;
+  payload: Record<string, unknown>;
 }
 
-export async function enqueue(name: string, payload: object = {}): Promise<string> {
+export async function enqueue(name: string, payload: JSONValue = {}): Promise<string> {
   const [task] = await sql`
     INSERT INTO tasks (name, payload)
     VALUES (${name}, ${sql.json(payload)})

@@ -5,5 +5,6 @@ export default defineConfig({
     env: {
       DATABASE_URL: "postgresql://durable:durable@localhost:5432/durable",
     },
+    fileParallelism: false,
   },
 });
