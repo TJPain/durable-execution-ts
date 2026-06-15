@@ -82,25 +82,31 @@ export async function start({
       continue;
     }
 
-    const job = processTask(task).finally(() => active.delete(job));
+    const job = processTask(task, workerId).finally(() => active.delete(job));
     active.add(job);
   }
 
   await Promise.all(active);
   clearInterval(heartbeatTimer);
   clearInterval(sweeperTimer);
-  await deregisterWorker(workerId);
+
+  try {
+    await deregisterWorker(workerId);
+  } catch (err) {
+    console.error("Failed to deregister worker:", err);
+  }
+
   console.log("Worker shut down");
 }
 
-export async function processTask(task: Task): Promise<void> {
+export async function processTask(task: Task, workerId: string): Promise<void> {
   console.log(`Processing task ${task.id} [${task.name}]`);
 
   const handler = handlers.get(task.name);
 
   if (!handler) {
     console.error(`No handler registered for "${task.name}"`);
-    await nack(task.id, task, new Error(`no handler registered for "${task.name}"`));
+    await nack(task.id, workerId, task, new Error(`no handler registered for "${task.name}"`));
     return;
   }
 
@@ -122,13 +128,12 @@ export async function processTask(task: Task): Promise<void> {
     clearTimeout(timer);
     const error = err instanceof Error ? err : new Error(String(err));
     console.error(`Failed task ${task.id}:`, error.message);
-    await nack(task.id, task, error);
+    await nack(task.id, workerId, task, error);
     return;
   }
 
-  // ack separately — if this fails, we don't nack (which would cause duplicate execution)
   try {
-    await ack(task.id);
+    await ack(task.id, workerId);
     console.log(`Completed task ${task.id}`);
   } catch (err) {
     console.error(`Failed to ack task ${task.id} (task completed but ack failed):`, err);

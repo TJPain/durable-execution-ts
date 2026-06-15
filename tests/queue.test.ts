@@ -99,12 +99,23 @@ describe("ack", () => {
   it("marks a task as completed and clears worker_id", async () => {
     await enqueue("task", {});
     const task = await dequeue(workerId);
-    await ack(task!.id);
+    await ack(task!.id, workerId);
 
     const [row] = await sql`SELECT status, completed_at, worker_id FROM tasks WHERE id = ${task!.id}`;
     expect(row.status).toBe("completed");
     expect(row.completed_at).not.toBeNull();
     expect(row.worker_id).toBeNull();
+  });
+
+  it("does not ack if worker_id does not match", async () => {
+    await enqueue("task", {});
+    const task = await dequeue(workerId);
+
+    const otherWorkerId = await registerWorker("other-worker");
+    await ack(task!.id, otherWorkerId);
+
+    const [row] = await sql`SELECT status FROM tasks WHERE id = ${task!.id}`;
+    expect(row.status).toBe("running");
   });
 });
 
@@ -112,7 +123,7 @@ describe("nack", () => {
   it("retries if under max attempts", async () => {
     await enqueue("task", {}, { maxAttempts: 3 });
     const task = await dequeue(workerId);
-    await nack(task!.id, task!, new Error("transient failure"));
+    await nack(task!.id, workerId, task!, new Error("transient failure"));
 
     const [row] = await sql`SELECT status, error, run_after, worker_id FROM tasks WHERE id = ${task!.id}`;
     expect(row.status).toBe("pending");
@@ -124,7 +135,7 @@ describe("nack", () => {
   it("fails permanently at max attempts", async () => {
     await enqueue("task", {}, { maxAttempts: 1 });
     const task = await dequeue(workerId);
-    await nack(task!.id, task!, new Error("fatal"));
+    await nack(task!.id, workerId, task!, new Error("fatal"));
 
     const [row] = await sql`SELECT status, error FROM tasks WHERE id = ${task!.id}`;
     expect(row.status).toBe("failed");
@@ -134,7 +145,7 @@ describe("nack", () => {
   it("fails permanently for NonRetryableError regardless of attempts", async () => {
     await enqueue("task", {}, { maxAttempts: 5 });
     const task = await dequeue(workerId);
-    await nack(task!.id, task!, new NonRetryableError("bad input"));
+    await nack(task!.id, workerId, task!, new NonRetryableError("bad input"));
 
     const [row] = await sql`SELECT status, error FROM tasks WHERE id = ${task!.id}`;
     expect(row.status).toBe("failed");
@@ -145,12 +156,12 @@ describe("nack", () => {
     await enqueue("task", {}, { maxAttempts: 4 });
 
     const first = await dequeue(workerId);
-    await nack(first!.id, first!, new Error("fail"));
+    await nack(first!.id, workerId, first!, new Error("fail"));
     const [after1] = await sql`SELECT run_after FROM tasks WHERE id = ${first!.id}`;
 
     await sql`UPDATE tasks SET run_after = now() WHERE id = ${first!.id}`;
     const second = await dequeue(workerId);
-    await nack(second!.id, second!, new Error("fail"));
+    await nack(second!.id, workerId, second!, new Error("fail"));
     const [after2] = await sql`SELECT run_after FROM tasks WHERE id = ${second!.id}`;
 
     const backoff1 = new Date(after1.run_after).getTime() - Date.now();
@@ -161,12 +172,23 @@ describe("nack", () => {
   it("does not update a task that is no longer running", async () => {
     await enqueue("task", {}, { maxAttempts: 3 });
     const task = await dequeue(workerId);
-    await ack(task!.id);
+    await ack(task!.id, workerId);
 
-    await nack(task!.id, task!, new Error("too late"));
+    await nack(task!.id, workerId, task!, new Error("too late"));
 
     const [row] = await sql`SELECT status FROM tasks WHERE id = ${task!.id}`;
     expect(row.status).toBe("completed");
+  });
+
+  it("does not nack if worker_id does not match", async () => {
+    await enqueue("task", {}, { maxAttempts: 3 });
+    const task = await dequeue(workerId);
+
+    const otherWorkerId = await registerWorker("other-worker");
+    await nack(task!.id, otherWorkerId, task!, new Error("not mine"));
+
+    const [row] = await sql`SELECT status FROM tasks WHERE id = ${task!.id}`;
+    expect(row.status).toBe("running");
   });
 });
 
@@ -182,19 +204,19 @@ describe("concurrent dequeue", () => {
 });
 
 describe("worker heartbeat and reclaim", () => {
-  it("reclaims tasks from stale workers", async () => {
+  it("reclaims tasks from stale workers and decrements attempts", async () => {
     await enqueue("stuck-task", {});
     await dequeue(workerId);
 
-    // Simulate stale worker by backdating heartbeat
     await sql`UPDATE workers SET last_heartbeat_at = now() - interval '60 seconds' WHERE id = ${workerId}`;
 
     const reclaimed = await reclaimStaleTasks(15);
     expect(reclaimed).toBe(1);
 
-    const [row] = await sql`SELECT status, worker_id FROM tasks WHERE name = 'stuck-task'`;
+    const [row] = await sql`SELECT status, worker_id, attempts FROM tasks WHERE name = 'stuck-task'`;
     expect(row.status).toBe("pending");
     expect(row.worker_id).toBeNull();
+    expect(row.attempts).toBe(0);
   });
 
   it("does not reclaim tasks from active workers", async () => {
@@ -205,11 +227,26 @@ describe("worker heartbeat and reclaim", () => {
     const reclaimed = await reclaimStaleTasks(15);
     expect(reclaimed).toBe(0);
   });
+
+  it("reclaimed tasks are not killed by schedule timeout", async () => {
+    // Task with a schedule timeout that's now in the past
+    await sql`
+      INSERT INTO tasks (name, payload, worker_id, status, attempts, schedule_timeout_at)
+      VALUES ('reclaimed', '{}', ${workerId}, 'running', 1, now() - interval '10 seconds')
+    `;
+
+    await sql`UPDATE workers SET last_heartbeat_at = now() - interval '60 seconds' WHERE id = ${workerId}`;
+
+    await reclaimStaleTasks(15);
+    await failScheduleTimeouts();
+
+    const [row] = await sql`SELECT status FROM tasks WHERE name = 'reclaimed'`;
+    expect(row.status).toBe("pending");
+  });
 });
 
 describe("schedule timeout", () => {
   it("fails tasks past their schedule_timeout_at", async () => {
-    // Insert a task with schedule_timeout_at in the past
     await sql`
       INSERT INTO tasks (name, payload, schedule_timeout_at)
       VALUES ('expired-task', '{}', now() - interval '1 second')

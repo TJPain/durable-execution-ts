@@ -32,7 +32,7 @@ export async function enqueue(
 ): Promise<string> {
   const { maxAttempts = 3, timeoutSeconds = 60, priority = 0, scheduleTimeoutSeconds } = options;
 
-  const scheduleTimeoutAt = scheduleTimeoutSeconds
+  const scheduleTimeoutAt = scheduleTimeoutSeconds != null
     ? sql`now() + ${scheduleTimeoutSeconds + " seconds"}::interval`
     : sql`NULL`;
 
@@ -66,20 +66,21 @@ export async function dequeue(workerId: string): Promise<Task | null> {
   return task ?? null;
 }
 
-export async function ack(id: string): Promise<void> {
+/** Only acks if this worker still owns the task. */
+export async function ack(id: string, workerId: string): Promise<void> {
   await sql`
     UPDATE tasks
     SET status = 'completed', completed_at = now(), worker_id = NULL
-    WHERE id = ${id} AND status = 'running'
+    WHERE id = ${id} AND status = 'running' AND worker_id = ${workerId}
   `;
 }
 
 /**
  * Marks a task as failed. If retryable and under max_attempts, requeues with
  * exponential backoff (2^n seconds). Otherwise fails permanently.
- * Only updates tasks still in 'running' state to prevent race conditions.
+ * Only updates if this worker still owns the task.
  */
-export async function nack(id: string, task: Pick<Task, "attempts" | "max_attempts">, error: Error): Promise<void> {
+export async function nack(id: string, workerId: string, task: Pick<Task, "attempts" | "max_attempts">, error: Error): Promise<void> {
   const isRetryable = !(error instanceof NonRetryableError);
 
   if (isRetryable && task.attempts < task.max_attempts) {
@@ -91,13 +92,13 @@ export async function nack(id: string, task: Pick<Task, "attempts" | "max_attemp
           error = ${error.message},
           worker_id = NULL,
           run_after = now() + ${backoffSeconds + " seconds"}::interval
-      WHERE id = ${id} AND status = 'running'
+      WHERE id = ${id} AND status = 'running' AND worker_id = ${workerId}
     `;
   } else {
     await sql`
       UPDATE tasks
       SET status = 'failed', completed_at = now(), worker_id = NULL, error = ${error.message}
-      WHERE id = ${id} AND status = 'running'
+      WHERE id = ${id} AND status = 'running' AND worker_id = ${workerId}
     `;
   }
 }
@@ -127,12 +128,17 @@ export async function deregisterWorker(workerId: string): Promise<void> {
 
 /**
  * Finds tasks stuck on stale workers (no heartbeat for inactivitySeconds)
- * and requeues them. Returns the number of reclaimed tasks.
+ * and requeues them. Decrements attempts so a crash doesn't consume a retry
+ * slot. Clears schedule_timeout_at to prevent false timeout after reclaim.
  */
 export async function reclaimStaleTasks(inactivitySeconds: number): Promise<number> {
   const result = await sql`
     UPDATE tasks
-    SET status = 'pending', worker_id = NULL, started_at = NULL
+    SET status = 'pending',
+        worker_id = NULL,
+        started_at = NULL,
+        attempts = GREATEST(attempts - 1, 0),
+        schedule_timeout_at = NULL
     WHERE id IN (
       SELECT t.id
       FROM tasks t

@@ -34,7 +34,7 @@ describe("processTask", () => {
     const id = await enqueue("test-task", { key: "value" });
     const task = await dequeueRaw(id);
 
-    await processTask(task);
+    await processTask(task, workerId);
 
     expect(received).toEqual({ key: "value" });
     const [row] = await sql`SELECT status FROM tasks WHERE id = ${id}`;
@@ -49,7 +49,7 @@ describe("processTask", () => {
     const id = await enqueue("failing-task", {}, { maxAttempts: 1 });
     const task = await dequeueRaw(id);
 
-    await processTask(task);
+    await processTask(task, workerId);
 
     const [row] = await sql`SELECT status, error FROM tasks WHERE id = ${id}`;
     expect(row.status).toBe("failed");
@@ -64,7 +64,7 @@ describe("processTask", () => {
     const id = await enqueue("retryable-task", {}, { maxAttempts: 3 });
     const task = await dequeueRaw(id);
 
-    await processTask(task);
+    await processTask(task, workerId);
 
     const [row] = await sql`SELECT status, error FROM tasks WHERE id = ${id}`;
     expect(row.status).toBe("pending");
@@ -75,7 +75,7 @@ describe("processTask", () => {
     const id = await enqueue("unknown-task", {}, { maxAttempts: 1 });
     const task = await dequeueRaw(id);
 
-    await processTask(task);
+    await processTask(task, workerId);
 
     const [row] = await sql`SELECT status FROM tasks WHERE id = ${id}`;
     expect(row.status).toBe("failed");
@@ -95,7 +95,7 @@ describe("processTask", () => {
     const id = await enqueue("slow-task", {}, { maxAttempts: 1, timeoutSeconds: 1 });
     const task = await dequeueRaw(id);
 
-    await processTask(task);
+    await processTask(task, workerId);
 
     const [row] = await sql`SELECT status FROM tasks WHERE id = ${id}`;
     expect(row.status).toBe("failed");
@@ -109,7 +109,7 @@ describe("processTask", () => {
     const id = await enqueue("ignores-signal", {}, { maxAttempts: 1, timeoutSeconds: 1 });
     const task = await dequeueRaw(id);
 
-    await processTask(task);
+    await processTask(task, workerId);
 
     const [row] = await sql`SELECT status FROM tasks WHERE id = ${id}`;
     expect(row.status).toBe("failed");

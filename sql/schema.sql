@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   timeout_seconds      INT NOT NULL DEFAULT 60,
   run_after            TIMESTAMPTZ NOT NULL DEFAULT now(),
   schedule_timeout_at  TIMESTAMPTZ,
-  worker_id            UUID REFERENCES workers(id),
+  worker_id            UUID REFERENCES workers(id) ON DELETE SET NULL,
   error                TEXT,
   created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
   started_at           TIMESTAMPTZ,
