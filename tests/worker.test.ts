@@ -1,11 +1,14 @@
 import { describe, it, expect, beforeEach, afterAll } from "vitest";
 import sql from "../src/db";
-import { enqueue, type Task } from "../src/queue";
+import { enqueue, registerWorker, type Task } from "../src/queue";
 import { register, clearHandlers, start, processTask } from "../src/worker";
 
+let workerId: string;
+
 beforeEach(async () => {
-  await sql`TRUNCATE tasks`;
+  await sql`TRUNCATE tasks, workers CASCADE`;
   clearHandlers();
+  workerId = await registerWorker("test-worker");
 });
 
 afterAll(async () => {
@@ -14,7 +17,7 @@ afterAll(async () => {
 
 async function dequeueRaw(id: string): Promise<Task> {
   const [task] = await sql<Task[]>`
-    UPDATE tasks SET status = 'running', attempts = attempts + 1
+    UPDATE tasks SET status = 'running', attempts = attempts + 1, worker_id = ${workerId}
     WHERE id = ${id}
     RETURNING id, name, payload, attempts, max_attempts, timeout_seconds
   `;
@@ -31,7 +34,7 @@ describe("processTask", () => {
     const id = await enqueue("test-task", { key: "value" });
     const task = await dequeueRaw(id);
 
-    await processTask(task);
+    await processTask(task, workerId);
 
     expect(received).toEqual({ key: "value" });
     const [row] = await sql`SELECT status FROM tasks WHERE id = ${id}`;
@@ -46,7 +49,7 @@ describe("processTask", () => {
     const id = await enqueue("failing-task", {}, { maxAttempts: 1 });
     const task = await dequeueRaw(id);
 
-    await processTask(task);
+    await processTask(task, workerId);
 
     const [row] = await sql`SELECT status, error FROM tasks WHERE id = ${id}`;
     expect(row.status).toBe("failed");
@@ -61,7 +64,7 @@ describe("processTask", () => {
     const id = await enqueue("retryable-task", {}, { maxAttempts: 3 });
     const task = await dequeueRaw(id);
 
-    await processTask(task);
+    await processTask(task, workerId);
 
     const [row] = await sql`SELECT status, error FROM tasks WHERE id = ${id}`;
     expect(row.status).toBe("pending");
@@ -72,7 +75,7 @@ describe("processTask", () => {
     const id = await enqueue("unknown-task", {}, { maxAttempts: 1 });
     const task = await dequeueRaw(id);
 
-    await processTask(task);
+    await processTask(task, workerId);
 
     const [row] = await sql`SELECT status FROM tasks WHERE id = ${id}`;
     expect(row.status).toBe("failed");
@@ -92,7 +95,7 @@ describe("processTask", () => {
     const id = await enqueue("slow-task", {}, { maxAttempts: 1, timeoutSeconds: 1 });
     const task = await dequeueRaw(id);
 
-    await processTask(task);
+    await processTask(task, workerId);
 
     const [row] = await sql`SELECT status FROM tasks WHERE id = ${id}`;
     expect(row.status).toBe("failed");
@@ -106,7 +109,7 @@ describe("processTask", () => {
     const id = await enqueue("ignores-signal", {}, { maxAttempts: 1, timeoutSeconds: 1 });
     const task = await dequeueRaw(id);
 
-    await processTask(task);
+    await processTask(task, workerId);
 
     const [row] = await sql`SELECT status FROM tasks WHERE id = ${id}`;
     expect(row.status).toBe("failed");
