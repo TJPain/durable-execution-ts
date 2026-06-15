@@ -1,8 +1,15 @@
-import { dequeue, ack, nack, type Task } from "./queue";
+import {
+  dequeue, ack, nack, type Task,
+  registerWorker, deregisterWorker, heartbeat,
+  reclaimStaleTasks, failScheduleTimeouts,
+} from "./queue";
 
 interface WorkerOptions {
+  name?: string;
   concurrency?: number;
   pollIntervalMs?: number;
+  heartbeatIntervalMs?: number;
+  inactivityThresholdSeconds?: number;
   signal?: AbortSignal;
 }
 
@@ -19,10 +26,38 @@ export function clearHandlers(): void {
   handlers.clear();
 }
 
-export async function start({ concurrency = 5, pollIntervalMs = 1000, signal }: WorkerOptions = {}): Promise<void> {
+export async function start({
+  name = "worker",
+  concurrency = 5,
+  pollIntervalMs = 1000,
+  heartbeatIntervalMs = 5000,
+  inactivityThresholdSeconds = 15,
+  signal,
+}: WorkerOptions = {}): Promise<void> {
+  const workerId = await registerWorker(name);
   const active = new Set<Promise<void>>();
 
-  console.log(`Worker started (concurrency=${concurrency}), polling for tasks...`);
+  console.log(`Worker "${name}" started (id=${workerId}, concurrency=${concurrency})`);
+
+  const heartbeatTimer = setInterval(async () => {
+    try {
+      await heartbeat(workerId);
+    } catch (err) {
+      console.error("Heartbeat failed:", err);
+    }
+  }, heartbeatIntervalMs);
+
+  const sweeperTimer = setInterval(async () => {
+    try {
+      const reclaimed = await reclaimStaleTasks(inactivityThresholdSeconds);
+      if (reclaimed > 0) console.log(`Reclaimed ${reclaimed} tasks from stale workers`);
+
+      const timedOut = await failScheduleTimeouts();
+      if (timedOut > 0) console.log(`Failed ${timedOut} tasks past scheduling timeout`);
+    } catch (err) {
+      console.error("Sweeper failed:", err);
+    }
+  }, pollIntervalMs * 5);
 
   while (!signal?.aborted) {
     if (active.size >= concurrency) {
@@ -33,7 +68,7 @@ export async function start({ concurrency = 5, pollIntervalMs = 1000, signal }: 
     let task: Task | null;
 
     try {
-      task = await dequeue();
+      task = await dequeue(workerId);
     } catch (err) {
       console.error("Failed to dequeue:", err);
       await sleep(pollIntervalMs);
@@ -52,6 +87,9 @@ export async function start({ concurrency = 5, pollIntervalMs = 1000, signal }: 
   }
 
   await Promise.all(active);
+  clearInterval(heartbeatTimer);
+  clearInterval(sweeperTimer);
+  await deregisterWorker(workerId);
   console.log("Worker shut down");
 }
 

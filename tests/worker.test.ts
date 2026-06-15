@@ -1,11 +1,14 @@
 import { describe, it, expect, beforeEach, afterAll } from "vitest";
 import sql from "../src/db";
-import { enqueue, type Task } from "../src/queue";
+import { enqueue, registerWorker, type Task } from "../src/queue";
 import { register, clearHandlers, start, processTask } from "../src/worker";
 
+let workerId: string;
+
 beforeEach(async () => {
-  await sql`TRUNCATE tasks`;
+  await sql`TRUNCATE tasks, workers CASCADE`;
   clearHandlers();
+  workerId = await registerWorker("test-worker");
 });
 
 afterAll(async () => {
@@ -14,7 +17,7 @@ afterAll(async () => {
 
 async function dequeueRaw(id: string): Promise<Task> {
   const [task] = await sql<Task[]>`
-    UPDATE tasks SET status = 'running', attempts = attempts + 1
+    UPDATE tasks SET status = 'running', attempts = attempts + 1, worker_id = ${workerId}
     WHERE id = ${id}
     RETURNING id, name, payload, attempts, max_attempts, timeout_seconds
   `;
