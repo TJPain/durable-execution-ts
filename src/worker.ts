@@ -50,6 +50,7 @@ export async function start({
     }
   }, heartbeatIntervalMs);
 
+  // Periodic cleanup: reclaim stuck tasks and fail overdue ones
   const sweeperTimer = setInterval(async () => {
     try {
       const reclaimed = await reclaimStaleTasks(inactivityThresholdSeconds);
@@ -65,7 +66,9 @@ export async function start({
     }
   }, resolvedSweeperInterval);
 
+  // Poll loop: dequeue tasks up to concurrency limit, sleep when idle
   while (!signal?.aborted) {
+    // Back-pressure: wait for any in-flight task to finish before polling again
     if (active.size >= concurrency) {
       await Promise.race(active);
       continue;
@@ -81,6 +84,7 @@ export async function start({
       continue;
     }
 
+    // Re-check after await — signal may have fired while we were dequeuing
     if (signal?.aborted) break;
 
     if (!task) {
@@ -88,10 +92,12 @@ export async function start({
       continue;
     }
 
+    // Fire-and-forget: .finally() removes it from the set when done
     const job = processTask(task, workerId).finally(() => active.delete(job));
     active.add(job);
   }
 
+  // Drain: wait for all in-flight tasks to finish before tearing down
   await Promise.all(active);
   clearInterval(heartbeatTimer);
   clearInterval(sweeperTimer);
@@ -124,6 +130,7 @@ export async function processTask(task: Task, workerId: string): Promise<void> {
     const handlerPromise = handler(task.payload, timeoutController.signal);
     handlerPromise.catch(() => {});
 
+    // First promise to settle wins — enforces timeout even if handler ignores the signal
     await Promise.race([
       handlerPromise,
       new Promise<never>((_, reject) => {
@@ -141,6 +148,8 @@ export async function processTask(task: Task, workerId: string): Promise<void> {
     return;
   }
 
+  // Ack separately — if this fails, the task ran successfully but stays "running"
+  // (the sweeper will eventually reclaim it rather than re-executing)
   try {
     await ack(task.id, workerId);
     console.log(`Completed task ${task.id}`);

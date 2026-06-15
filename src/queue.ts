@@ -25,6 +25,7 @@ export class NonRetryableError extends Error {
   }
 }
 
+/** Adds a task to the queue. Returns its ID. */
 export async function enqueue(
   name: string,
   payload: JSONValue = {},
