@@ -152,6 +152,25 @@ export async function reclaimStaleTasks(inactivitySeconds: number): Promise<numb
 }
 
 /**
+ * Reclaims tasks stuck in 'running' with no worker (e.g. ack failed during shutdown
+ * and deregister set worker_id to NULL). Without this, these tasks are invisible
+ * to both reclaimStaleTasks (needs a worker JOIN) and failScheduleTimeouts (needs pending status).
+ */
+export async function reclaimOrphanedTasks(staleSeconds: number): Promise<number> {
+  const result = await sql`
+    UPDATE tasks
+    SET status = 'pending',
+        started_at = NULL,
+        attempts = GREATEST(attempts - 1, 0),
+        schedule_timeout_at = NULL
+    WHERE status = 'running'
+      AND worker_id IS NULL
+      AND started_at < now() - ${staleSeconds + " seconds"}::interval
+  `;
+  return result.count;
+}
+
+/**
  * Fails pending tasks that have exceeded their schedule_timeout_at.
  * Returns the number of timed-out tasks.
  */

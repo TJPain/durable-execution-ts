@@ -1,7 +1,7 @@
 import {
   dequeue, ack, nack, type Task,
   registerWorker, deregisterWorker, heartbeat,
-  reclaimStaleTasks, failScheduleTimeouts,
+  reclaimStaleTasks, reclaimOrphanedTasks, failScheduleTimeouts,
 } from "./queue";
 
 interface WorkerOptions {
@@ -9,6 +9,7 @@ interface WorkerOptions {
   concurrency?: number;
   pollIntervalMs?: number;
   heartbeatIntervalMs?: number;
+  sweeperIntervalMs?: number;
   inactivityThresholdSeconds?: number;
   signal?: AbortSignal;
 }
@@ -31,9 +32,11 @@ export async function start({
   concurrency = 5,
   pollIntervalMs = 1000,
   heartbeatIntervalMs = 5000,
+  sweeperIntervalMs,
   inactivityThresholdSeconds = 15,
   signal,
 }: WorkerOptions = {}): Promise<void> {
+  const resolvedSweeperInterval = sweeperIntervalMs ?? Math.floor(inactivityThresholdSeconds * 1000 / 3);
   const workerId = await registerWorker(name);
   const active = new Set<Promise<void>>();
 
@@ -52,12 +55,15 @@ export async function start({
       const reclaimed = await reclaimStaleTasks(inactivityThresholdSeconds);
       if (reclaimed > 0) console.log(`Reclaimed ${reclaimed} tasks from stale workers`);
 
+      const orphaned = await reclaimOrphanedTasks(inactivityThresholdSeconds);
+      if (orphaned > 0) console.log(`Reclaimed ${orphaned} orphaned tasks`);
+
       const timedOut = await failScheduleTimeouts();
       if (timedOut > 0) console.log(`Failed ${timedOut} tasks past scheduling timeout`);
     } catch (err) {
       console.error("Sweeper failed:", err);
     }
-  }, pollIntervalMs * 5);
+  }, resolvedSweeperInterval);
 
   while (!signal?.aborted) {
     if (active.size >= concurrency) {
@@ -114,9 +120,12 @@ export async function processTask(task: Task, workerId: string): Promise<void> {
   const timer = setTimeout(() => timeoutController.abort(), task.timeout_seconds * 1000);
 
   try {
-    // Promise.race enforces the timeout even if the handler ignores the signal
+    // Suppress unhandled rejection from the handler after timeout settles the race
+    const handlerPromise = handler(task.payload, timeoutController.signal);
+    handlerPromise.catch(() => {});
+
     await Promise.race([
-      handler(task.payload, timeoutController.signal),
+      handlerPromise,
       new Promise<never>((_, reject) => {
         timeoutController.signal.addEventListener("abort", () =>
           reject(new Error(`task timed out after ${task.timeout_seconds}s`))

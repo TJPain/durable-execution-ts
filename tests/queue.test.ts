@@ -3,7 +3,7 @@ import sql from "../src/db";
 import {
   enqueue, dequeue, ack, nack, NonRetryableError,
   registerWorker, deregisterWorker, heartbeat,
-  reclaimStaleTasks, failScheduleTimeouts,
+  reclaimStaleTasks, reclaimOrphanedTasks, failScheduleTimeouts,
 } from "../src/queue";
 
 let workerId: string;
@@ -242,6 +242,33 @@ describe("worker heartbeat and reclaim", () => {
 
     const [row] = await sql`SELECT status FROM tasks WHERE name = 'reclaimed'`;
     expect(row.status).toBe("pending");
+  });
+});
+
+describe("orphaned task reclaim", () => {
+  it("reclaims running tasks with no worker_id", async () => {
+    await sql`
+      INSERT INTO tasks (name, payload, status, worker_id, attempts, started_at)
+      VALUES ('orphaned', '{}', 'running', NULL, 2, now() - interval '60 seconds')
+    `;
+
+    const reclaimed = await reclaimOrphanedTasks(15);
+    expect(reclaimed).toBe(1);
+
+    const [row] = await sql`SELECT status, attempts, started_at FROM tasks WHERE name = 'orphaned'`;
+    expect(row.status).toBe("pending");
+    expect(row.attempts).toBe(1);
+    expect(row.started_at).toBeNull();
+  });
+
+  it("does not reclaim recent orphaned tasks", async () => {
+    await sql`
+      INSERT INTO tasks (name, payload, status, worker_id, attempts, started_at)
+      VALUES ('fresh-orphan', '{}', 'running', NULL, 1, now())
+    `;
+
+    const reclaimed = await reclaimOrphanedTasks(15);
+    expect(reclaimed).toBe(0);
   });
 });
 
