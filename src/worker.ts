@@ -3,6 +3,7 @@ import {
   registerWorker, deregisterWorker, heartbeat,
   reclaimStaleTasks, reclaimOrphanedTasks, failScheduleTimeouts,
 } from "./queue";
+import { DurableContext } from "./durableContext";
 
 interface WorkerOptions {
   name?: string;
@@ -14,17 +15,26 @@ interface WorkerOptions {
   signal?: AbortSignal;
 }
 
-/** Handlers receive an AbortSignal that fires when the task's timeout expires. */
+/** Regular handler — receives raw payload and an abort signal. */
 type TaskHandler = (payload: object, signal: AbortSignal) => Promise<void>;
 
+/** Durable handler — receives a DurableContext for checkpointed steps and an abort signal. */
+type DurableTaskHandler = (ctx: DurableContext, signal: AbortSignal) => Promise<void>;
+
 const handlers = new Map<string, TaskHandler>();
+const durableHandlers = new Map<string, DurableTaskHandler>();
 
 export function register(name: string, handler: TaskHandler): void {
   handlers.set(name, handler);
 }
 
+export function registerDurable(name: string, handler: DurableTaskHandler): void {
+  durableHandlers.set(name, handler);
+}
+
 export function clearHandlers(): void {
   handlers.clear();
+  durableHandlers.clear();
 }
 
 export async function start({
@@ -112,22 +122,36 @@ export async function start({
 }
 
 export async function processTask(task: Task, workerId: string): Promise<void> {
-  console.log(`Processing task ${task.id} [${task.name}]`);
-
-  const handler = handlers.get(task.name);
-
-  if (!handler) {
-    console.error(`No handler registered for "${task.name}"`);
-    await nack(task.id, workerId, task, new Error(`no handler registered for "${task.name}"`));
-    return;
-  }
+  console.log(`Processing task ${task.id} [${task.name}]${task.is_durable ? " (durable)" : ""}`);
 
   const timeoutController = new AbortController();
   const timer = setTimeout(() => timeoutController.abort(), task.timeout_seconds * 1000);
 
+  let handlerPromise: Promise<void>;
+
+  if (task.is_durable) {
+    const durableHandler = durableHandlers.get(task.name);
+    if (!durableHandler) {
+      clearTimeout(timer);
+      console.error(`No durable handler registered for "${task.name}"`);
+      await nack(task.id, workerId, task, new Error(`no handler registered for "${task.name}"`));
+      return;
+    }
+    const ctx = new DurableContext(task.id);
+    handlerPromise = durableHandler(ctx, timeoutController.signal);
+  } else {
+    const handler = handlers.get(task.name);
+    if (!handler) {
+      clearTimeout(timer);
+      console.error(`No handler registered for "${task.name}"`);
+      await nack(task.id, workerId, task, new Error(`no handler registered for "${task.name}"`));
+      return;
+    }
+    handlerPromise = handler(task.payload, timeoutController.signal);
+  }
+
   try {
     // Suppress unhandled rejection from the handler after timeout settles the race
-    const handlerPromise = handler(task.payload, timeoutController.signal);
     handlerPromise.catch(() => {});
 
     // First promise to settle wins — enforces timeout even if handler ignores the signal

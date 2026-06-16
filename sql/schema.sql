@@ -19,9 +19,18 @@ CREATE TABLE IF NOT EXISTS tasks (
   schedule_timeout_at  TIMESTAMPTZ,
   worker_id            UUID REFERENCES workers(id) ON DELETE SET NULL,
   error                TEXT,
+  is_durable           BOOLEAN NOT NULL DEFAULT false,
   created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
   started_at           TIMESTAMPTZ,
   completed_at         TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS durable_events (
+  task_id     UUID NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  event_id    INT NOT NULL,
+  output      JSONB NOT NULL DEFAULT 'null',
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (task_id, event_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_tasks_dequeue ON tasks (status, priority DESC, run_after, created_at)
