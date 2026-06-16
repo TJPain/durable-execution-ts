@@ -4,7 +4,7 @@ Building a durable execution engine from scratch using TypeScript, Node.js and P
 
 Durable execution is a mechanism to incrementally checkpoint the state of a function as it makes progress, so that in the case of unexpected failure, the function can recover from where it left off. It's particularly relevant in newer stacks and projects implementing AI agents, which are long-running and stateful. A system which implements durable execution is often called a "workflow engine."
 
-Inspired by the Go project [Durable Execution, the Hard Way](https://github.com/hatchet-dev/durable-execution-the-hard-way) but extended with LISTEN/NOTIFY.
+Inspired by the Go project [Durable Execution, the Hard Way](https://github.com/hatchet-dev/durable-execution-the-hard-way).
 
 ## Architecture
 
@@ -16,6 +16,8 @@ graph LR
   Worker -->|heartbeat| Queue
   Sweeper -->|reclaim stuck tasks| Queue
   Sweeper -->|fail expired tasks| Queue
+  Worker -->|checkpoint steps| EventLog[(durable_events)]
+  Worker -->|replay steps| EventLog
 ```
 
 ### Task lifecycle
@@ -37,6 +39,7 @@ stateDiagram-v2
 |-----------|------|----------------|
 | **Queue** | `src/queue.ts` | Enqueue/dequeue tasks, ack/nack, worker registration, sweeper queries |
 | **Worker** | `src/worker.ts` | Poll loop, concurrent task dispatch, heartbeat, timeout enforcement |
+| **DurableContext** | `src/durableContext.ts` | Step checkpointing and replay for durable tasks |
 | **DB** | `src/db.ts` | Postgres connection pool via [Postgres.js](https://github.com/porsager/postgres) |
 
 ## Features
@@ -64,6 +67,25 @@ Tasks can specify a scheduling timeout — if they sit in `pending` for too long
 ### Priority ordering
 
 Tasks have a `priority` field (default 0). Higher priority tasks skip ahead in the queue. Payment processing at priority 10 will always be dequeued before a background report at priority 0, regardless of creation time.
+
+### Durable execution
+
+Tasks registered with `registerDurable` receive a `DurableContext` instead of raw payload. Handlers call `ctx.run(label, fn)` for each logical step:
+
+```ts
+registerDurable("onboard-user", async (ctx) => {
+  const userId = await ctx.run("create-account", async () => createAccount());
+  await ctx.run("send-email", async () => sendWelcomeEmail(userId));
+});
+```
+
+Each step's return value is persisted to `durable_events`. On retry, completed steps are skipped and their stored output is returned directly — the handler resumes from where it left off. If new steps are inserted between retries, a `NonDeterminismError` is thrown.
+
+Enqueue a durable task with `isDurable: true`:
+
+```ts
+await enqueue("onboard-user", { userId: "abc" }, { isDurable: true });
+```
 
 ## Prerequisites
 

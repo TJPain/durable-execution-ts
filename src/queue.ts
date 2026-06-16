@@ -8,6 +8,7 @@ export interface Task {
   attempts: number;
   max_attempts: number;
   timeout_seconds: number;
+  is_durable: boolean;
 }
 
 interface EnqueueOptions {
@@ -15,6 +16,7 @@ interface EnqueueOptions {
   timeoutSeconds?: number;
   priority?: number;
   scheduleTimeoutSeconds?: number;
+  isDurable?: boolean;
 }
 
 /** Throw this from a handler to fail the task permanently, bypassing retry logic. */
@@ -31,15 +33,15 @@ export async function enqueue(
   payload: JSONValue = {},
   options: EnqueueOptions = {}
 ): Promise<string> {
-  const { maxAttempts = 3, timeoutSeconds = 60, priority = 0, scheduleTimeoutSeconds } = options;
+  const { maxAttempts = 3, timeoutSeconds = 60, priority = 0, scheduleTimeoutSeconds, isDurable = false } = options;
 
   const scheduleTimeoutAt = scheduleTimeoutSeconds != null
     ? sql`now() + ${scheduleTimeoutSeconds + " seconds"}::interval`
     : sql`NULL`;
 
   const [task] = await sql`
-    INSERT INTO tasks (name, payload, max_attempts, timeout_seconds, priority, schedule_timeout_at)
-    VALUES (${name}, ${sql.json(payload)}, ${maxAttempts}, ${timeoutSeconds}, ${priority}, ${scheduleTimeoutAt})
+    INSERT INTO tasks (name, payload, max_attempts, timeout_seconds, priority, schedule_timeout_at, is_durable)
+    VALUES (${name}, ${sql.json(payload)}, ${maxAttempts}, ${timeoutSeconds}, ${priority}, ${scheduleTimeoutAt}, ${isDurable})
     RETURNING id
   `;
   return task.id;
@@ -62,7 +64,7 @@ export async function dequeue(workerId: string): Promise<Task | null> {
       FOR UPDATE SKIP LOCKED
       LIMIT 1
     )
-    RETURNING id, name, payload, attempts, max_attempts, timeout_seconds
+    RETURNING id, name, payload, attempts, max_attempts, timeout_seconds, is_durable
   `;
   return task ?? null;
 }

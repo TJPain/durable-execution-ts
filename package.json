@@ -8,7 +8,7 @@
     "test": "vitest run",
     "db:up": "docker compose up -d",
     "db:migrate": "psql $DATABASE_URL -f sql/schema.sql",
-    "db:reset": "psql $DATABASE_URL -c 'DROP TABLE IF EXISTS tasks; DROP TABLE IF EXISTS workers;' && npm run db:migrate"
+    "db:reset": "psql $DATABASE_URL -c 'DROP TABLE IF EXISTS durable_events, tasks, workers CASCADE' && npm run db:migrate"
   },
   "keywords": [],
   "author": "",

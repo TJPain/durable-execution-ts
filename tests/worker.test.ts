@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach, afterAll } from "vitest";
 import sql from "../src/db";
 import { enqueue, registerWorker, type Task } from "../src/queue";
-import { register, clearHandlers, start, processTask } from "../src/worker";
+import { register, registerDurable, clearHandlers, start, processTask } from "../src/worker";
+import type { DurableContext } from "../src/durableContext";
 
 let workerId: string;
 
@@ -19,7 +20,7 @@ async function dequeueRaw(id: string): Promise<Task> {
   const [task] = await sql<Task[]>`
     UPDATE tasks SET status = 'running', attempts = attempts + 1, worker_id = ${workerId}
     WHERE id = ${id}
-    RETURNING id, name, payload, attempts, max_attempts, timeout_seconds
+    RETURNING id, name, payload, attempts, max_attempts, timeout_seconds, is_durable
   `;
   return task;
 }
@@ -114,6 +115,70 @@ describe("processTask", () => {
     const [row] = await sql`SELECT status FROM tasks WHERE id = ${id}`;
     expect(row.status).toBe("failed");
   }, 3000);
+});
+
+describe("processTask (durable)", () => {
+  it("runs a durable task and checkpoints each step", async () => {
+    const steps: string[] = [];
+
+    registerDurable("durable-task", async (ctx: DurableContext) => {
+      await ctx.run("step-1", async () => { steps.push("step-1"); return "a"; });
+      await ctx.run("step-2", async () => { steps.push("step-2"); return "b"; });
+    });
+
+    const id = await enqueue("durable-task", {}, { isDurable: true });
+    const task = await dequeueRaw(id);
+    await processTask(task, workerId);
+
+    expect(steps).toEqual(["step-1", "step-2"]);
+
+    const events = await sql`SELECT event_id, output FROM durable_events WHERE task_id = ${id} ORDER BY event_id`;
+    expect(events).toHaveLength(2);
+    expect(events[0].output).toBe("a");
+    expect(events[1].output).toBe("b");
+
+    const [row] = await sql`SELECT status FROM tasks WHERE id = ${id}`;
+    expect(row.status).toBe("completed");
+  });
+
+  it("skips already-checkpointed steps on retry", async () => {
+    const steps: string[] = [];
+
+    registerDurable("durable-task", async (ctx: DurableContext) => {
+      await ctx.run("step-1", async () => { steps.push("step-1"); return "a"; });
+      await ctx.run("step-2", async () => { steps.push("step-2"); return "b"; });
+    });
+
+    const id = await enqueue("durable-task", {}, { isDurable: true });
+
+    // Simulate step-1 having been checkpointed on a prior attempt
+    await sql`INSERT INTO durable_events (task_id, event_id, label, output) VALUES (${id}, 0, 'step-1', ${sql.json("a")})`;
+
+    const task = await dequeueRaw(id);
+    await processTask(task, workerId);
+
+    // Only step-2 should have actually executed
+    expect(steps).toEqual(["step-2"]);
+  });
+
+  it("does not nack when evicted — task stays running for the new owner", async () => {
+    const otherWorkerId = await registerWorker("other-worker");
+
+    registerDurable("durable-task", async (ctx: DurableContext) => {
+      // Simulate eviction mid-handler: reassign the task to another worker
+      await sql`UPDATE tasks SET worker_id = ${otherWorkerId} WHERE id = ${ctx["taskId"]}`;
+      await ctx.run("step-1", async () => "x");
+    });
+
+    const id = await enqueue("durable-task", {}, { isDurable: true });
+    const task = await dequeueRaw(id);
+    await processTask(task, workerId);
+
+    // Task should still be running (owned by the other worker), not failed/pending
+    const [row] = await sql`SELECT status, worker_id FROM tasks WHERE id = ${id}`;
+    expect(row.status).toBe("running");
+    expect(row.worker_id).toBe(otherWorkerId);
+  });
 });
 
 describe("start", () => {

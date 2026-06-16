@@ -1,6 +1,7 @@
 import sql from "./db";
 import { enqueue } from "./queue";
-import { register, start } from "./worker";
+import { register, registerDurable, start } from "./worker";
+import type { DurableContext } from "./durableContext";
 
 register("send-welcome-email", async (payload) => {
   const { email } = payload as { email: string };
@@ -20,6 +21,29 @@ register("process-payment", async (payload) => {
   console.log(`Processed payment of £${amount}`);
 });
 
+// Durable task: each step is checkpointed. On retry, completed steps are
+// skipped and their output is returned from the event log instead of re-running.
+registerDurable("onboard-user", async (ctx: DurableContext) => {
+  const userId = await ctx.run("create-account", async () => {
+    await sleep(500);
+    console.log("  Creating account...");
+    return "user-123";
+  });
+
+  const emailId = await ctx.run("send-welcome-email", async () => {
+    await sleep(300);
+    console.log(`  Sending welcome email to ${userId}...`);
+    return "email-456";
+  });
+
+  await ctx.run("provision-resources", async () => {
+    await sleep(400);
+    console.log(`  Provisioning resources for ${userId} (email receipt: ${emailId})...`);
+  });
+
+  console.log(`Onboarded user ${userId}`);
+});
+
 // Low priority — background work
 await enqueue("generate-report", { reportType: "monthly" }, { priority: 0 });
 await enqueue("send-welcome-email", { email: "user@example.com" }, { priority: 1 });
@@ -30,6 +54,9 @@ await enqueue("process-payment", { amount: 250 }, { priority: 10 });
 
 // This one has a scheduling timeout — if not picked up in 30s, it fails
 await enqueue("generate-report", { reportType: "ad-hoc" }, { priority: 0, scheduleTimeoutSeconds: 30 });
+
+// Durable task — steps are checkpointed in durable_events
+await enqueue("onboard-user", { userId: "new-user" }, { isDurable: true });
 
 const controller = new AbortController();
 process.on("SIGINT", () => controller.abort());
