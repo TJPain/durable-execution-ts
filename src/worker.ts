@@ -140,7 +140,7 @@ export async function processTask(task: Task, workerId: string): Promise<void> {
     // Promise.resolve().then() ensures a synchronous throw becomes a rejected
     // promise, so it's caught below rather than escaping the try block entirely.
     handlerPromise = Promise.resolve()
-      .then(() => DurableContext.create(task.id))
+      .then(() => DurableContext.create(task.id, workerId))
       .then(ctx => durableHandler(ctx, timeoutController.signal));
   } else {
     const handler = handlers.get(task.name);

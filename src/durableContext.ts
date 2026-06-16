@@ -9,6 +9,14 @@ export class NonDeterminismError extends Error {
   }
 }
 
+/** Thrown when a worker can't acquire the task lock — it has been evicted and another worker owns the task. */
+export class DurableTaskEvictedError extends Error {
+  constructor(taskId: string) {
+    super(`Worker no longer owns task ${taskId}; event write aborted`);
+    this.name = "DurableTaskEvictedError";
+  }
+}
+
 interface EventRow {
   label: string;
   output: unknown;
@@ -20,8 +28,9 @@ interface EventRow {
  * of re-executing. Steps are identified by position; label mismatches between
  * retries throw NonDeterminismError.
  *
- * All prior events are loaded once at construction time to avoid N serial
- * round-trips on replay.
+ * All prior events are loaded once at construction time. Each new event write
+ * acquires a short-lived row-level lock on the task row to guard against a
+ * stale/evicted worker writing events after another worker has taken ownership.
  */
 export class DurableContext {
   private nextEventId = 0;
@@ -29,19 +38,20 @@ export class DurableContext {
 
   private constructor(
     private readonly taskId: string,
+    private readonly workerId: string,
     events: Map<number, EventRow>,
   ) {
     this.events = events;
   }
 
-  static async create(taskId: string): Promise<DurableContext> {
+  static async create(taskId: string, workerId: string): Promise<DurableContext> {
     const rows = await sql<{ event_id: number; label: string; output: unknown }[]>`
       SELECT event_id, label, output FROM durable_events
       WHERE task_id = ${taskId}
       ORDER BY event_id
     `;
     const events = new Map(rows.map(r => [r.event_id, { label: r.label, output: r.output }]));
-    return new DurableContext(taskId, events);
+    return new DurableContext(taskId, workerId, events);
   }
 
   async run<T>(label: string, fn: () => Promise<T>): Promise<T> {
@@ -58,10 +68,27 @@ export class DurableContext {
 
     const output = await fn();
 
-    await sql`
-      INSERT INTO durable_events (task_id, event_id, label, output)
-      VALUES (${this.taskId}, ${eventId}, ${label}, ${sql.json(output as any)})
-    `;
+    await sql.begin(async (tx) => {
+      // Acquire a row-level lock on the task. SKIP LOCKED means if another
+      // transaction holds the lock (a new worker), we immediately get no rows
+      // rather than waiting — we're evicted and must not write.
+      const [locked] = await tx`
+        SELECT id FROM tasks
+        WHERE id = ${this.taskId}
+          AND worker_id = ${this.workerId}
+          AND status = 'running'
+        FOR UPDATE SKIP LOCKED
+      `;
+
+      if (!locked) {
+        throw new DurableTaskEvictedError(this.taskId);
+      }
+
+      await tx`
+        INSERT INTO durable_events (task_id, event_id, label, output)
+        VALUES (${this.taskId}, ${eventId}, ${label}, ${sql.json(output as any)})
+      `;
+    });
 
     console.log(`  [durable] step ${eventId} (${label}): executed and checkpointed`);
     return output;
