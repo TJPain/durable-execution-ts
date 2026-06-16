@@ -3,7 +3,7 @@ import {
   registerWorker, deregisterWorker, heartbeat,
   reclaimStaleTasks, reclaimOrphanedTasks, failScheduleTimeouts,
 } from "./queue";
-import { DurableContext } from "./durableContext";
+import { DurableContext, DurableTaskEvictedError } from "./durableContext";
 
 interface WorkerOptions {
   name?: string;
@@ -169,6 +169,13 @@ export async function processTask(task: Task, workerId: string): Promise<void> {
     clearTimeout(timer);
   } catch (err) {
     clearTimeout(timer);
+    if (err instanceof DurableTaskEvictedError) {
+      // This worker was evicted before completing the task — another worker has
+      // already taken ownership. Skip nack (the WHERE clause would make it a
+      // no-op anyway) and log clearly so this doesn't look like a failure.
+      console.log(`Task ${task.id} was evicted from this worker — it is running on another worker`);
+      return;
+    }
     const error = err instanceof Error ? err : new Error(String(err));
     console.error(`Failed task ${task.id}:`, error.message);
     await nack(task.id, workerId, task, error);

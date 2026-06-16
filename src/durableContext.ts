@@ -31,6 +31,10 @@ interface EventRow {
  * All prior events are loaded once at construction time. Each new event write
  * acquires a short-lived row-level lock on the task row to guard against a
  * stale/evicted worker writing events after another worker has taken ownership.
+ *
+ * At-least-once semantics: fn() executes before the checkpoint is committed to
+ * the DB. A crash between fn() completing and the INSERT committing will cause
+ * fn() to run again on retry. Steps must therefore be idempotent.
  */
 export class DurableContext {
   private nextEventId = 0;

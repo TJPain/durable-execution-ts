@@ -160,6 +160,25 @@ describe("processTask (durable)", () => {
     // Only step-2 should have actually executed
     expect(steps).toEqual(["step-2"]);
   });
+
+  it("does not nack when evicted — task stays running for the new owner", async () => {
+    const otherWorkerId = await registerWorker("other-worker");
+
+    registerDurable("durable-task", async (ctx: DurableContext) => {
+      // Simulate eviction mid-handler: reassign the task to another worker
+      await sql`UPDATE tasks SET worker_id = ${otherWorkerId} WHERE id = ${ctx["taskId"]}`;
+      await ctx.run("step-1", async () => "x");
+    });
+
+    const id = await enqueue("durable-task", {}, { isDurable: true });
+    const task = await dequeueRaw(id);
+    await processTask(task, workerId);
+
+    // Task should still be running (owned by the other worker), not failed/pending
+    const [row] = await sql`SELECT status, worker_id FROM tasks WHERE id = ${id}`;
+    expect(row.status).toBe("running");
+    expect(row.worker_id).toBe(otherWorkerId);
+  });
 });
 
 describe("start", () => {
