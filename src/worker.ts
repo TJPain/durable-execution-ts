@@ -137,8 +137,11 @@ export async function processTask(task: Task, workerId: string): Promise<void> {
       await nack(task.id, workerId, task, new Error(`no handler registered for "${task.name}"`));
       return;
     }
-    const ctx = new DurableContext(task.id);
-    handlerPromise = durableHandler(ctx, timeoutController.signal);
+    // Promise.resolve().then() ensures a synchronous throw becomes a rejected
+    // promise, so it's caught below rather than escaping the try block entirely.
+    handlerPromise = Promise.resolve()
+      .then(() => DurableContext.create(task.id))
+      .then(ctx => durableHandler(ctx, timeoutController.signal));
   } else {
     const handler = handlers.get(task.name);
     if (!handler) {
@@ -147,7 +150,7 @@ export async function processTask(task: Task, workerId: string): Promise<void> {
       await nack(task.id, workerId, task, new Error(`no handler registered for "${task.name}"`));
       return;
     }
-    handlerPromise = handler(task.payload, timeoutController.signal);
+    handlerPromise = Promise.resolve().then(() => handler(task.payload, timeoutController.signal));
   }
 
   try {

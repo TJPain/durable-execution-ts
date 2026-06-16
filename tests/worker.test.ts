@@ -152,7 +152,7 @@ describe("processTask (durable)", () => {
     const id = await enqueue("durable-task", {}, { isDurable: true });
 
     // Simulate step-1 having been checkpointed on a prior attempt
-    await sql`INSERT INTO durable_events (task_id, event_id, output) VALUES (${id}, 0, ${sql.json("a")})`;
+    await sql`INSERT INTO durable_events (task_id, event_id, label, output) VALUES (${id}, 0, 'step-1', ${sql.json("a")})`;
 
     const task = await dequeueRaw(id);
     await processTask(task, workerId);
